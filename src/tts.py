@@ -1,5 +1,6 @@
 import asyncio
 import io
+import logging
 import threading
 
 import edge_tts
@@ -60,8 +61,9 @@ class TTSEngine:
         thread.start()
 
     def stop(self):
-        if self._current_channel:
-            self._current_channel.stop()
+        with self._lock:
+            if self._current_channel:
+                self._current_channel.stop()
 
     def set_speed(self, speed: float):
         self._speed = speed
@@ -70,7 +72,8 @@ class TTSEngine:
         try:
             audio = asyncio.run(self._fetch_edge_audio(text, voice, rate))
             self._play_audio(audio)
-        except Exception:
+        except Exception as e:
+            logging.warning("Edge TTS failed (%s), falling back to SAPI", e)
             self._speak_sapi(text)
 
     @staticmethod
