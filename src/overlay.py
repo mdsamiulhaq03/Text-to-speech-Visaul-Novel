@@ -70,6 +70,9 @@ class OverlayWindow:
             "font": tkfont.Font(family="Arial", size=8),
             "padx": 7, "pady": 2, "cursor": "hand2", "bd": 0,
         }
+        tk.Button(top_bar, text="—",
+                  command=lambda: root.iconify(), **icon_style
+                  ).pack(side=tk.RIGHT, padx=(4, 0))
         tk.Button(top_bar, text="📍 Region",
                   command=self._on_region_change, **icon_style
                   ).pack(side=tk.RIGHT, padx=(4, 0))

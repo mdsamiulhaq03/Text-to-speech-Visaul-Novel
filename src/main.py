@@ -61,6 +61,8 @@ def main():
     )
 
     def on_new_line(character: str, text: str):
+        if text == last_line["text"]:
+            return
         last_line["character"] = character
         last_line["text"] = text
         overlay.update_line(character, text)
