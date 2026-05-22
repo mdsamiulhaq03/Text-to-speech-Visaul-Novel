@@ -95,21 +95,57 @@ def _game_is_visible(state: CaptureState) -> bool:
 
 
 def start_capture_loop(region: dict, state: CaptureState, on_new_line, interval: float = 0.5):
-    """Runs in a background daemon thread. Calls on_new_line(name, text) on change."""
+    """
+    Runs in a background daemon thread. Calls on_new_line(name, text) on change.
+    Requires the same text to appear STABLE_READS consecutive times before firing,
+    so OCR jitter during TTS playback cannot interrupt mid-sentence.
+    """
+    STABLE_READS = 2  # ~1 second at 500ms interval before speech triggers
 
     def loop():
+        pending_hash  = ""
+        pending_name  = ""
+        pending_text  = ""
+        pending_count = 0
+
         while True:
             try:
                 if not _game_is_visible(state):
                     time.sleep(interval)
                     continue
+
                 raw = ocr_region(region)
-                if has_changed(raw, state):
+                h = hashlib.md5(_normalize(raw).encode()).hexdigest()
+
+                if h == state._last_hash:
+                    # Still showing confirmed text — reset any pending candidate
+                    pending_hash = ""
+                    pending_count = 0
+                    time.sleep(interval)
+                    continue
+
+                # New/different text seen — track stability
+                if h == pending_hash:
+                    pending_count += 1
+                else:
+                    # Fresh candidate — start counting from 1
                     name, text = parse_dialogue(raw)
-                    if text:
-                        if _WIN32 and state.game_hwnd == 0:
-                            state.game_hwnd = win32gui.GetForegroundWindow()
-                        on_new_line(name, text)
+                    pending_hash  = h
+                    pending_name  = name
+                    pending_text  = text
+                    pending_count = 1
+
+                if pending_count >= STABLE_READS and pending_text:
+                    # Text has been stable long enough — confirm and fire
+                    state._last_hash = pending_hash
+                    confirmed_name   = pending_name
+                    confirmed_text   = pending_text
+                    pending_hash     = ""
+                    pending_count    = 0
+                    if _WIN32 and state.game_hwnd == 0:
+                        state.game_hwnd = win32gui.GetForegroundWindow()
+                    on_new_line(confirmed_name, confirmed_text)
+
             except Exception:
                 pass
             time.sleep(interval)
