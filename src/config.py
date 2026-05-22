@@ -11,6 +11,7 @@ class Config:
         self.voices: dict[str, str] = {}
         self.volumes: dict[str, float] = {}
         self.speed: float = 1.0
+        self.game_folder: str = ""
         self._save_lock = threading.Lock()
         self._load()
 
@@ -24,6 +25,7 @@ class Config:
             self.voices = data.get("voices", {})
             self.volumes = data.get("volumes", {})
             self.speed = data.get("speed", 1.0)
+            self.game_folder = data.get("game_folder", "")
         except json.JSONDecodeError:
             pass
 
@@ -33,6 +35,7 @@ class Config:
             "voices": self.voices,
             "volumes": self.volumes,
             "speed": self.speed,
+            "game_folder": self.game_folder,
         }
         dir_path = os.path.dirname(self._path)
         if dir_path:

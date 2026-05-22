@@ -1,7 +1,7 @@
 import logging
 import threading
 import tkinter as tk
-from tkinter import font as tkfont
+from tkinter import font as tkfont, filedialog
 from collections import deque
 
 from PIL import Image, ImageDraw
@@ -43,22 +43,27 @@ class OverlayWindow:
     """
 
     def __init__(self, on_repeat, on_stop, on_speed_change,
-                 on_region_change, on_voice_save,
+                 on_region_change, on_voice_save, on_game_folder_change,
                  speed: float = 1.0,
                  voices: dict | None = None,
-                 volumes: dict | None = None):
-        self._on_repeat       = on_repeat
-        self._on_stop         = on_stop
-        self._on_speed_change = on_speed_change
-        self._on_region_change = on_region_change
-        self._on_voice_save   = on_voice_save
-        self._initial_speed   = speed
-        self._voices          = dict(voices or {})
-        self._volumes         = dict(volumes or {})
+                 volumes: dict | None = None,
+                 game_folder: str = "",
+                 script_db=None):
+        self._on_repeat            = on_repeat
+        self._on_stop              = on_stop
+        self._on_speed_change      = on_speed_change
+        self._on_region_change     = on_region_change
+        self._on_voice_save        = on_voice_save
+        self._on_game_folder_change = on_game_folder_change
+        self._initial_speed        = speed
+        self._voices               = dict(voices or {})
+        self._volumes              = dict(volumes or {})
+        self._game_folder          = game_folder
+        self._script_db            = script_db
         self._history: deque[tuple[str, str]] = deque(maxlen=HISTORY_MAX)
-        self._muted           = False
-        self._root            = None
-        self._tray_icon       = None
+        self._muted                = False
+        self._root                 = None
+        self._tray_icon            = None
 
     # ── public thread-safe updates ────────────────────────────────────
 
@@ -119,6 +124,9 @@ class OverlayWindow:
         # right-side icon buttons (right-to-left pack order)
         tk.Button(top, text="—",
                   command=self._minimize_to_tray, **icon_btn
+                  ).pack(side=tk.RIGHT, padx=(3, 0))
+        tk.Button(top, text="⚙ Settings",
+                  command=self._open_settings_dialog, **icon_btn
                   ).pack(side=tk.RIGHT, padx=(3, 0))
         tk.Button(top, text="📍 Region",
                   command=self._on_region_change, **icon_btn
@@ -355,6 +363,102 @@ class OverlayWindow:
 
         dlg.update_idletasks()
         dlg.geometry(f"{dlg.winfo_reqwidth()+32}x{dlg.winfo_reqheight()}")
+
+    # ── settings dialog ───────────────────────────────────────────────
+
+    def set_script_db(self, db):
+        self._script_db = db
+
+    def _open_settings_dialog(self):
+        if not self._root:
+            return
+        dlg = tk.Toplevel(self._root)
+        dlg.title("Settings")
+        dlg.configure(bg=BG2)
+        dlg.attributes("-topmost", True)
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        norm = tkfont.Font(family="Arial", size=9)
+        small = tkfont.Font(family="Arial", size=8)
+        bold = tkfont.Font(family="Arial", size=10, weight="bold")
+
+        # ── Game Scripts section ──────────────────────────────────────
+        tk.Label(dlg, text="Game Scripts (optional)",
+                 fg=ACCENT_LIGHT, bg=BG2, font=bold
+                 ).pack(padx=16, pady=(12, 2), anchor="w")
+        tk.Label(
+            dlg,
+            text="Point to the game's 'game/' folder to get exact character names\n"
+                 "from .rpy script files. OCR is still used for timing.",
+            fg=MUTED, bg=BG2, font=small, justify="left",
+        ).pack(padx=16, pady=(0, 8), anchor="w")
+        tk.Frame(dlg, bg=BORDER, height=1).pack(fill=tk.X, padx=16, pady=(0, 8))
+
+        folder_row = tk.Frame(dlg, bg=BG2)
+        folder_row.pack(padx=16, fill=tk.X)
+
+        folder_var = tk.StringVar(value=self._game_folder or "No folder selected")
+        tk.Label(folder_row, textvariable=folder_var,
+                 fg=TEXT, bg=BG2, font=small,
+                 width=38, anchor="w", wraplength=280
+                 ).pack(side=tk.LEFT)
+
+        def pick_folder():
+            path = filedialog.askdirectory(
+                title="Select the game's 'game/' folder",
+                parent=dlg,
+            )
+            if path:
+                folder_var.set(path)
+
+        tk.Button(folder_row, text="Browse…", command=pick_folder,
+                  bg=BORDER, fg=TEXT, relief="flat", font=small,
+                  padx=8, pady=2, cursor="hand2",
+                  activebackground=ACCENT, activeforeground="white",
+                  ).pack(side=tk.LEFT, padx=(8, 0))
+
+        # status label
+        self._script_status_var = tk.StringVar(value=self._script_status_text())
+        tk.Label(dlg, textvariable=self._script_status_var,
+                 fg=GREEN if (self._script_db and self._script_db.is_loaded) else MUTED,
+                 bg=BG2, font=small
+                 ).pack(padx=16, pady=(6, 0), anchor="w")
+
+        tk.Frame(dlg, bg=BORDER, height=1).pack(fill=tk.X, padx=16, pady=(10, 6))
+
+        def save():
+            new_folder = folder_var.get()
+            if new_folder == "No folder selected":
+                new_folder = ""
+            dlg.destroy()
+            self._game_folder = new_folder
+            self._on_game_folder_change(new_folder)
+
+        tk.Button(dlg, text="Save & Load Scripts", command=save,
+                  bg=ACCENT, fg="white", relief="flat",
+                  padx=16, pady=4, cursor="hand2",
+                  activebackground=ACCENT2,
+                  font=norm,
+                  ).pack(pady=(0, 12))
+
+        dlg.update_idletasks()
+        dlg.geometry(f"{max(dlg.winfo_reqwidth()+32, 380)}x{dlg.winfo_reqheight()}")
+
+    def _script_status_text(self) -> str:
+        db = self._script_db
+        if db is None:
+            return "Scripts: not loaded"
+        if db.load_error:
+            return f"Scripts: error — {db.load_error}"
+        if db.is_loaded:
+            return f"Scripts: ✓ {db.line_count:,} lines loaded"
+        return "Scripts: loading…"
+
+    def update_script_status(self):
+        """Call from main thread after script loading completes."""
+        if self._root and hasattr(self, "_script_status_var"):
+            self._root.after(0, self._script_status_var.set, self._script_status_text())
 
     # ── entry point ───────────────────────────────────────────────────
 
