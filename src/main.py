@@ -1,4 +1,5 @@
 import logging
+import os
 
 from src.config import Config
 from src.capture import CaptureState, start_capture_loop
@@ -43,14 +44,17 @@ def main():
 
     last_line = {"character": "", "text": ""}
 
-    def on_region_change():
-        new_region = select_region_toplevel(overlay._root)
-        if not new_region or new_region.get("width", 0) < 10:
+    def apply_new_region(region: dict):
+        if not region or region.get("width", 0) < 10:
             return
-        cfg.region = new_region
+        cfg.region = region
         capture_state._last_hash = ""
         cfg.save()
         start_capture_loop(cfg.region, capture_state, on_new_line, interval=0.5)
+
+    def on_region_change():
+        new_region = select_region_toplevel(overlay._root)
+        apply_new_region(new_region)
 
     def on_voice_save(updated_voices: dict, updated_volumes: dict):
         voice_pool._map.update(updated_voices)
@@ -68,6 +72,25 @@ def main():
         overlay.update_script_status()
         script_db.load(folder, on_done=lambda: overlay.update_script_status())
 
+    def on_pos_save(x: int, y: int):
+        cfg.window_x = x
+        cfg.window_y = y
+        cfg.save()
+
+    def on_reset():
+        # Wipe config and restart cleanly
+        try:
+            os.remove(CONFIG_PATH)
+        except FileNotFoundError:
+            pass
+        tts.stop()
+        if overlay._tray_icon:
+            overlay._tray_icon.stop()
+        if overlay._root:
+            overlay._root.destroy()
+        # Re-run main from scratch
+        main()
+
     overlay = OverlayWindow(
         on_repeat=lambda: tts.speak(last_line["character"], last_line["text"]),
         on_stop=tts.stop,
@@ -75,12 +98,17 @@ def main():
         on_region_change=on_region_change,
         on_voice_save=on_voice_save,
         on_game_folder_change=on_game_folder_change,
+        on_reset=on_reset,
         speed=cfg.speed,
         voices=cfg.voices,
         volumes=cfg.volumes,
         game_folder=cfg.game_folder,
         script_db=script_db,
+        window_x=cfg.window_x,
+        window_y=cfg.window_y,
     )
+    overlay._on_pos_save = on_pos_save
+    overlay.set_region_apply_callback(apply_new_region)
 
     # Auto-load scripts from saved folder on startup
     if cfg.game_folder:
@@ -90,7 +118,7 @@ def main():
         if text == last_line["text"]:
             return
 
-        # Use script database for character name if available (more accurate than OCR)
+        # Use script database for character name if available
         if script_db.is_loaded:
             resolved = script_db.lookup(text)
             if resolved:
@@ -99,9 +127,9 @@ def main():
         last_line["character"] = character
         last_line["text"] = text
         overlay.update_line(character, text)
-        tts.stop()
+        # Queue: finish current sentence then speak next
         if not overlay.is_muted():
-            tts.speak(character, text)
+            tts.speak_queued(character, text)
         cfg.voices.update(voice_pool.assignments())
         overlay.update_voices(cfg.voices)
         cfg.save()

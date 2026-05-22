@@ -44,26 +44,33 @@ class OverlayWindow:
 
     def __init__(self, on_repeat, on_stop, on_speed_change,
                  on_region_change, on_voice_save, on_game_folder_change,
+                 on_reset,
                  speed: float = 1.0,
                  voices: dict | None = None,
                  volumes: dict | None = None,
                  game_folder: str = "",
-                 script_db=None):
-        self._on_repeat            = on_repeat
-        self._on_stop              = on_stop
-        self._on_speed_change      = on_speed_change
-        self._on_region_change     = on_region_change
-        self._on_voice_save        = on_voice_save
+                 script_db=None,
+                 window_x: int = -1,
+                 window_y: int = -1):
+        self._on_repeat             = on_repeat
+        self._on_stop               = on_stop
+        self._on_speed_change       = on_speed_change
+        self._on_region_change      = on_region_change
+        self._on_voice_save         = on_voice_save
         self._on_game_folder_change = on_game_folder_change
-        self._initial_speed        = speed
-        self._voices               = dict(voices or {})
-        self._volumes              = dict(volumes or {})
-        self._game_folder          = game_folder
-        self._script_db            = script_db
+        self._on_reset              = on_reset
+        self._initial_speed         = speed
+        self._voices                = dict(voices or {})
+        self._volumes               = dict(volumes or {})
+        self._game_folder           = game_folder
+        self._script_db             = script_db
+        self._window_x              = window_x
+        self._window_y              = window_y
+        self._on_pos_save           = None  # set after build
         self._history: deque[tuple[str, str]] = deque(maxlen=HISTORY_MAX)
-        self._muted                = False
-        self._root                 = None
-        self._tray_icon            = None
+        self._muted                 = False
+        self._root                  = None
+        self._tray_icon             = None
 
     # ── public thread-safe updates ────────────────────────────────────
 
@@ -91,19 +98,25 @@ class OverlayWindow:
     def build(self):
         root = tk.Tk()
         root.title("TTS Companion")
-        root.geometry("560x178")
+        pos = (f"+{self._window_x}+{self._window_y}"
+               if self._window_x >= 0 else "")
+        root.geometry(f"560x178{pos}")
         root.attributes("-topmost", True)
         root.attributes("-alpha", 0.95)
         root.wm_attributes("-toolwindow", True)
         root.configure(bg=BG)
         root.resizable(False, False)
 
-        # drag
+        # drag + save position on release
         root._drag_x = root._drag_y = 0
         root.bind("<ButtonPress-1>",
                   lambda e: setattr(root, "_drag_x", e.x) or setattr(root, "_drag_y", e.y))
         root.bind("<B1-Motion>", lambda e: root.geometry(
             f"+{root.winfo_x()+e.x-root._drag_x}+{root.winfo_y()+e.y-root._drag_y}"
+        ))
+        root.bind("<ButtonRelease-1>", lambda e: (
+            self._on_pos_save(root.winfo_x(), root.winfo_y())
+            if self._on_pos_save else None
         ))
 
         # ── top bar ───────────────────────────────────────────────────
@@ -435,15 +448,81 @@ class OverlayWindow:
             self._game_folder = new_folder
             self._on_game_folder_change(new_folder)
 
-        tk.Button(dlg, text="Save & Load Scripts", command=save,
+        def auto_detect():
+            from src.capture import auto_detect_region
+            status_var.set("Detecting… (screenshot in 3s)")
+            dlg.update_idletasks()
+            dlg.after(3000, _do_auto_detect)
+
+        def _do_auto_detect():
+            from src.capture import auto_detect_region
+            region = auto_detect_region()
+            if region:
+                status_var.set(
+                    f"Detected region: {region['width']}×{region['height']} "
+                    f"at ({region['left']},{region['top']})"
+                )
+                self._on_region_change_with_value(region)
+            else:
+                status_var.set("Could not detect dialogue area — try manually.")
+
+        status_var = tk.StringVar(value="")
+        tk.Label(dlg, textvariable=status_var, fg=MUTED, bg=BG2,
+                 font=tkfont.Font(family="Arial", size=8)
+                 ).pack(padx=16, anchor="w")
+
+        btn_row = tk.Frame(dlg, bg=BG2)
+        btn_row.pack(pady=(4, 0))
+
+        tk.Button(btn_row, text="🔍 Auto-detect Region",
+                  command=auto_detect,
+                  bg=BORDER, fg=TEXT, relief="flat",
+                  padx=12, pady=4, cursor="hand2",
+                  activebackground=ACCENT, activeforeground="white",
+                  font=norm,
+                  ).pack(side=tk.LEFT, padx=(0, 6))
+
+        tk.Button(btn_row, text="Save & Load Scripts", command=save,
                   bg=ACCENT, fg="white", relief="flat",
-                  padx=16, pady=4, cursor="hand2",
+                  padx=12, pady=4, cursor="hand2",
                   activebackground=ACCENT2,
+                  font=norm,
+                  ).pack(side=tk.LEFT)
+
+        # ── Reset section ─────────────────────────────────────────────
+        tk.Frame(dlg, bg=BORDER, height=1).pack(fill=tk.X, padx=16, pady=(12, 6))
+        tk.Label(dlg, text="Danger Zone",
+                 fg=RED, bg=BG2,
+                 font=tkfont.Font(family="Arial", size=9, weight="bold")
+                 ).pack(padx=16, anchor="w")
+        tk.Label(dlg,
+                 text="Clears all voices, volumes, region, position and settings.",
+                 fg=MUTED, bg=BG2,
+                 font=tkfont.Font(family="Arial", size=8)
+                 ).pack(padx=16, pady=(0, 6), anchor="w")
+
+        def do_reset():
+            dlg.destroy()
+            self._on_reset()
+
+        tk.Button(dlg, text="🔄 Reset Everything", command=do_reset,
+                  bg=RED, fg="white", relief="flat",
+                  padx=12, pady=4, cursor="hand2",
+                  activebackground="#dc2626",
                   font=norm,
                   ).pack(pady=(0, 12))
 
         dlg.update_idletasks()
         dlg.geometry(f"{max(dlg.winfo_reqwidth()+32, 380)}x{dlg.winfo_reqheight()}")
+
+    def set_region_apply_callback(self, cb):
+        """Register callback for applying a pre-computed region (auto-detect)."""
+        self._on_region_apply = cb
+
+    def _on_region_change_with_value(self, region: dict):
+        cb = getattr(self, "_on_region_apply", None)
+        if cb and self._root:
+            self._root.after(0, lambda: cb(region))
 
     def _script_status_text(self) -> str:
         db = self._script_db
