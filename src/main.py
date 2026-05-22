@@ -32,6 +32,7 @@ def main():
         on_repeat=lambda: tts.speak(last_line["character"], last_line["text"]),
         on_stop=tts.stop,
         on_speed_change=lambda v: (tts.set_speed(v), setattr(cfg, "speed", v), cfg.save()),
+        speed=cfg.speed,
     )
 
     def on_new_line(character: str, text: str):
