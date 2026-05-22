@@ -7,9 +7,9 @@ from collections import deque
 from PIL import Image, ImageDraw
 import pystray
 
-from src.tts import VOICE_POOL, NARRATOR_VOICE
+from src.tts import VOICE_POOL, NARRATOR_VOICE, check_online, fetch_available_voices, load_cached_voices
 
-ALL_VOICES   = VOICE_POOL + [NARRATOR_VOICE]
+ALL_VOICES   = load_cached_voices()   # populated from cache or built-in pool
 HISTORY_MAX  = 20
 FONT         = "Segoe UI"   # Modern Windows font, falls back gracefully
 
@@ -159,6 +159,13 @@ class OverlayWindow:
                  fg=ACCENT_L, bg=BG_HEADER,
                  font=(FONT, 11, "bold"), anchor="w"
                  ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # Online status badge
+        self._net_var = tk.StringVar(value="…")
+        self._net_lbl = tk.Label(hdr, textvariable=self._net_var,
+                                  fg=SUBTEXT, bg=BG_HEADER,
+                                  font=(FONT, 7), padx=6)
+        self._net_lbl.pack(side=tk.LEFT, padx=(0, 4))
 
         # Right-side icon buttons
         def _hbtn(parent, label, cmd, danger=False):
@@ -353,6 +360,41 @@ class OverlayWindow:
         dlg.grab_set()
 
         _dlg_title(dlg, "Character Voices & Volume")
+
+        # ── online status + refresh row ───────────────────────────────
+        net_row = tk.Frame(dlg, bg=BG_DIALOG)
+        net_row.pack(padx=16, pady=(0, 8), fill=tk.X)
+
+        refresh_status = tk.StringVar(value=f"{len(ALL_VOICES)} voices available")
+        tk.Label(net_row, textvariable=refresh_status,
+                 fg=SUBTEXT, bg=BG_DIALOG,
+                 font=(FONT, 8)).pack(side=tk.LEFT)
+
+        # dropdown update helper — rebuilds menus after refresh
+        menu_refs: list = []   # filled after dropdown creation
+
+        def on_voices_refreshed(new_voices):
+            if not new_voices:
+                return
+            refresh_status.set(f"✓ {len(new_voices)} voices refreshed")
+            for menu_widget, var in menu_refs:
+                menu_widget["menu"].delete(0, "end")
+                for v in new_voices:
+                    menu_widget["menu"].add_command(
+                        label=v,
+                        command=lambda val=v, sv=var: sv.set(val)
+                    )
+
+        def do_refresh():
+            self.refresh_voice_list(refresh_status, on_done_ui=on_voices_refreshed)
+
+        tk.Button(net_row, text="🔄 Refresh",
+                  command=do_refresh,
+                  bg=BORDER, fg=TEXT, relief="flat",
+                  font=(FONT, 8), padx=8, cursor="hand2",
+                  activebackground=ACCENT, activeforeground=TEXT,
+                  ).pack(side=tk.RIGHT)
+
         tk.Label(dlg, text="Volume  0.5 = quiet · 1.0 = normal · 2.0 = loud",
                  fg=SUBTEXT, bg=BG_DIALOG,
                  font=(FONT, 8)).pack(padx=16, pady=(0, 8), anchor="w")
@@ -386,6 +428,7 @@ class OverlayWindow:
             menu["menu"].config(bg=BG_MAIN, fg=TEXT,
                                 activebackground=ACCENT, activeforeground=TEXT)
             menu.pack(side=tk.LEFT, padx=(6, 14))
+            menu_refs.append((menu, vv))
 
             tk.Label(row, text="Vol:", fg=SUBTEXT, bg=BG_DIALOG,
                      font=(FONT, 8)).pack(side=tk.LEFT)
@@ -537,11 +580,55 @@ class OverlayWindow:
         if self._root and hasattr(self, "_script_status_var"):
             self._root.after(0, self._script_status_var.set, self._script_status_text())
 
+    # ── connectivity check ────────────────────────────────────────────────────
+
+    def _check_connectivity(self):
+        """Run online check in background, update badge, reschedule every 30s."""
+        def worker():
+            online = check_online()
+            if self._root:
+                self._root.after(0, self._apply_net_status, online)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_net_status(self, online: bool):
+        if not self._root:
+            return
+        if online:
+            self._net_var.set("● EDGE")
+            self._net_lbl.config(fg=GREEN)
+        else:
+            self._net_var.set("● SAPI")
+            self._net_lbl.config(fg=RED)
+        # Re-check in 30 seconds
+        self._root.after(30_000, self._check_connectivity)
+
+    def refresh_voice_list(self, status_var: tk.StringVar = None,
+                           on_done_ui=None):
+        """Fetch fresh voice list from Edge TTS; update ALL_VOICES global."""
+        global ALL_VOICES
+        if status_var and self._root:
+            self._root.after(0, status_var.set, "Fetching voices…")
+
+        def on_done(voices, error):
+            global ALL_VOICES
+            if voices:
+                ALL_VOICES = voices
+                msg = f"✓ {len(voices)} voices loaded"
+            else:
+                msg = f"Error: {error}"
+            if self._root:
+                self._root.after(0, status_var.set, msg) if status_var else None
+                if on_done_ui:
+                    self._root.after(0, on_done_ui, voices or [])
+
+        fetch_available_voices(on_done=on_done)
+
     # ── entry point ───────────────────────────────────────────────────────────
 
     def start(self):
         self.build()
         self._start_tray()
+        self._check_connectivity()   # initial check + starts 30s loop
         self._root.mainloop()
         if self._tray_icon:
             self._tray_icon.stop()
