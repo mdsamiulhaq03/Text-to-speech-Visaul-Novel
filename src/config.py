@@ -14,14 +14,21 @@ class Config:
     def _load(self):
         if not os.path.exists(self._path):
             return
-        with open(self._path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        self.region = data.get("region")
-        self.voices = data.get("voices", {})
-        self.speed = data.get("speed", 1.0)
+        try:
+            with open(self._path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self.region = data.get("region")
+            self.voices = data.get("voices", {})
+            self.speed = data.get("speed", 1.0)
+        except json.JSONDecodeError:
+            # Silently fall back to defaults if JSON is corrupted
+            pass
 
     def save(self):
         data = {"region": self.region, "voices": self.voices, "speed": self.speed}
+        dir_path = os.path.dirname(self._path)
+        if dir_path:  # Handle edge case where dirname returns empty string
+            os.makedirs(dir_path, exist_ok=True)
         with open(self._path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
 
