@@ -1,7 +1,10 @@
 import asyncio
 import io
+import json
 import logging
+import socket
 import threading
+from pathlib import Path
 
 import edge_tts
 import pyttsx3
@@ -17,7 +20,58 @@ VOICE_POOL = [
     "en-IN-NeerjaNeural",
     "en-US-AriaNeural",
 ]
-NARRATOR_VOICE = "en-US-ChristopherNeural"
+NARRATOR_VOICE  = "en-US-ChristopherNeural"
+_CACHE_PATH     = Path(__file__).parent.parent / "voices_cache.json"
+
+
+# ── connectivity & voice discovery ───────────────────────────────────────────
+
+def check_online() -> bool:
+    """Return True if we can reach the internet (fast 2-second check)."""
+    try:
+        socket.create_connection(("8.8.8.8", 53), timeout=2)
+        return True
+    except OSError:
+        return False
+
+
+async def _list_voices_async() -> list[dict]:
+    return await edge_tts.list_voices()
+
+
+def fetch_available_voices(on_done=None):
+    """
+    Fetch the full Edge TTS voice list in a background thread.
+    Calls on_done(voices: list[str], error: str | None) when finished.
+    Saves results to voices_cache.json.
+    """
+    def worker():
+        try:
+            all_voices = asyncio.run(_list_voices_async())
+            # Keep English voices, sorted by short name
+            english = sorted(
+                v["ShortName"] for v in all_voices
+                if v.get("Locale", "").startswith("en-")
+            )
+            _CACHE_PATH.write_text(json.dumps(english, indent=2), encoding="utf-8")
+            if on_done:
+                on_done(english, None)
+        except Exception as e:
+            if on_done:
+                on_done(None, str(e))
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def load_cached_voices() -> list[str]:
+    """Load voices from cache file. Falls back to built-in pool if cache missing."""
+    try:
+        if _CACHE_PATH.exists():
+            data = json.loads(_CACHE_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, list) and data:
+                return data
+    except Exception:
+        pass
+    return VOICE_POOL + [NARRATOR_VOICE]
 
 
 class VoicePool:
