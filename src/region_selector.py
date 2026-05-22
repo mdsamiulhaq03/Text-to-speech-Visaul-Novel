@@ -37,6 +37,8 @@ def select_region() -> dict:
 
     def on_drag(event):
         nonlocal rect_id
+        if "x" not in start:
+            return
         if rect_id:
             canvas.delete(rect_id)
         try:

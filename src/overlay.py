@@ -8,10 +8,11 @@ class OverlayWindow:
     Call start() to enter the tkinter main loop (blocks).
     """
 
-    def __init__(self, on_repeat, on_stop, on_speed_change):
+    def __init__(self, on_repeat, on_stop, on_speed_change, speed: float = 1.0):
         self._on_repeat = on_repeat
         self._on_stop = on_stop
         self._on_speed_change = on_speed_change
+        self._initial_speed = speed
         self._root = None
 
     def build(self):
@@ -64,7 +65,7 @@ class OverlayWindow:
         tk.Label(controls, text="Speed:", fg="#94a3b8", bg="#1a1a2e",
                  font=tkfont.Font(family="Arial", size=9)).pack(side=tk.LEFT)
 
-        self._speed_var = tk.DoubleVar(value=1.0)
+        self._speed_var = tk.DoubleVar(value=self._initial_speed)
         slider = tk.Scale(
             controls, from_=0.5, to=2.0, resolution=0.1,
             orient=tk.HORIZONTAL, variable=self._speed_var,
