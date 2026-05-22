@@ -1,0 +1,60 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install pyinstaller
+          pip install -r requirements.txt
+
+      - name: Build executable
+        run: |
+          pyinstaller --onefile --windowed --name RenpyTTS `
+            --hidden-import=pystray._win32 `
+            --hidden-import=pyttsx3.drivers `
+            --hidden-import=pyttsx3.drivers.sapi5 `
+            --collect-all edge_tts `
+            src/main.py
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/RenpyTTS.exe
+          generate_release_notes: true
+          body: |
+            ## Ren'Py TTS Companion ${{ github.ref_name }}
+
+            A desktop companion that reads Ren'Py visual novel dialogue aloud in real-time using screen capture + OCR, with per-character neural voices.
+
+            ### Quick Start
+            1. Install **[Tesseract OCR](https://github.com/UB-Mannheim/tesseract/wiki)** — use the default install path (`C:\Program Files\Tesseract-OCR\`)
+            2. Download **`RenpyTTS.exe`** from the assets below
+            3. Double-click to launch — on first run, draw a rectangle over your game's dialogue box
+            4. Play your Ren'Py game — the companion reads each line aloud automatically
+
+            ### Hotkeys
+            | Hotkey | Action |
+            |--------|--------|
+            | `Ctrl+Alt+R` | Repeat last line |
+            | `Ctrl+Alt+S` | Stop playback |
+            | `Ctrl+Alt+M` | Toggle mute |
+
+            See the [README](https://github.com/${{ github.repository }}#readme) for full documentation, voice customisation, and troubleshooting.
