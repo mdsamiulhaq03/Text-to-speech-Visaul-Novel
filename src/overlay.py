@@ -9,27 +9,34 @@ import pystray
 
 from src.tts import VOICE_POOL, NARRATOR_VOICE
 
-ALL_VOICES = VOICE_POOL + [NARRATOR_VOICE]
-HISTORY_MAX = 20
+ALL_VOICES   = VOICE_POOL + [NARRATOR_VOICE]
+HISTORY_MAX  = 20
+FONT         = "Segoe UI"   # Modern Windows font, falls back gracefully
 
-BG      = "#0f0f1a"
-BG2     = "#1a1a2e"
-ACCENT  = "#7c3aed"
-ACCENT2 = "#6d28d9"
-ACCENT_LIGHT = "#a78bfa"
-TEXT    = "#e2e8f0"
-MUTED   = "#64748b"
-BORDER  = "#2d2d44"
-GREEN   = "#22c55e"
-RED     = "#ef4444"
+# ── colour palette ────────────────────────────────────────────────────────────
+BG_HEADER  = "#080810"
+BG_MAIN    = "#0d0d18"
+BG_CTRL    = "#080810"
+BG_DIALOG  = "#10101e"
+BORDER     = "#1c1c2e"
+ACCENT     = "#7c3aed"
+ACCENT_H   = "#9333ea"
+ACCENT_L   = "#c084fc"
+TEXT       = "#f1f5f9"
+SUBTEXT    = "#475569"
+MUTED      = "#334155"
+DOT_IDLE   = "#2d3748"
+DOT_PLAY   = "#22c55e"
+DOT_MUTE   = "#ef4444"
+RED        = "#ef4444"
+GREEN      = "#22c55e"
 
 
 def _make_tray_image() -> Image.Image:
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
+    d   = ImageDraw.Draw(img)
     d.ellipse([2, 2, 62, 62], fill="#7c3aed")
-    bar_heights = [14, 22, 30, 22, 14]
-    for i, h in enumerate(bar_heights):
+    for i, h in enumerate([14, 22, 30, 22, 14]):
         x = 12 + i * 10
         d.rectangle([x, 32 - h // 2, x + 6, 32 + h // 2], fill="white")
     return img
@@ -37,7 +44,7 @@ def _make_tray_image() -> Image.Image:
 
 class OverlayWindow:
     """
-    Always-on-top companion window.
+    Borderless always-on-top companion window.
     Call update_line(character, text) from any thread.
     Call start() to enter the tkinter main loop (blocks).
     """
@@ -59,26 +66,29 @@ class OverlayWindow:
         self._on_voice_save         = on_voice_save
         self._on_game_folder_change = on_game_folder_change
         self._on_reset              = on_reset
-        self._initial_speed         = speed
+        self._speed                 = speed
         self._voices                = dict(voices or {})
         self._volumes               = dict(volumes or {})
         self._game_folder           = game_folder
         self._script_db             = script_db
         self._window_x              = window_x
         self._window_y              = window_y
-        self._on_pos_save           = None  # set after build
+        self._on_pos_save           = None
         self._history: deque[tuple[str, str]] = deque(maxlen=HISTORY_MAX)
         self._muted                 = False
         self._root                  = None
         self._tray_icon             = None
+        self._dot_canvas            = None
+        self._dot_id                = None
 
-    # ── public thread-safe updates ────────────────────────────────────
+    # ── thread-safe public API ────────────────────────────────────────────────
 
     def update_line(self, character: str, text: str):
         if self._root:
             self._history.append((character, text))
             self._root.after(0, self._char_var.set, character)
             self._root.after(0, self._text_var.set, text)
+            self._root.after(0, self._set_dot, DOT_PLAY)
 
     def update_voices(self, voices: dict):
         self._voices = dict(voices)
@@ -93,143 +103,190 @@ class OverlayWindow:
         if self._root:
             self._root.after(0, self._do_toggle_mute)
 
-    # ── build UI ──────────────────────────────────────────────────────
+    def set_region_apply_callback(self, cb):
+        self._on_region_apply = cb
+
+    # ── build ─────────────────────────────────────────────────────────────────
 
     def build(self):
         root = tk.Tk()
-        root.title("TTS Companion")
-        pos = (f"+{self._window_x}+{self._window_y}"
-               if self._window_x >= 0 else "")
-        root.geometry(f"560x178{pos}")
+        root.overrideredirect(True)                   # borderless
         root.attributes("-topmost", True)
-        root.attributes("-alpha", 0.95)
-        root.wm_attributes("-toolwindow", True)
-        root.configure(bg=BG)
-        root.resizable(False, False)
+        root.attributes("-alpha", 0.96)
+        root.configure(bg=BORDER)                     # 1-px border colour
 
-        # drag + save position on release
-        root._drag_x = root._drag_y = 0
-        root.bind("<ButtonPress-1>",
-                  lambda e: setattr(root, "_drag_x", e.x) or setattr(root, "_drag_y", e.y))
-        root.bind("<B1-Motion>", lambda e: root.geometry(
-            f"+{root.winfo_x()+e.x-root._drag_x}+{root.winfo_y()+e.y-root._drag_y}"
-        ))
-        root.bind("<ButtonRelease-1>", lambda e: (
-            self._on_pos_save(root.winfo_x(), root.winfo_y())
-            if self._on_pos_save else None
-        ))
+        pos = f"+{self._window_x}+{self._window_y}" if self._window_x >= 0 else "+200+200"
+        root.geometry(f"580x152{pos}")
 
-        # ── top bar ───────────────────────────────────────────────────
-        top = tk.Frame(root, bg=BG)
-        top.pack(fill=tk.X, padx=10, pady=(8, 2))
+        # ── drag on entire window ─────────────────────────────────────────────
+        root._dx = root._dy = 0
 
+        def _press(e):
+            root._dx, root._dy = e.x, e.y
+
+        def _drag(e):
+            root.geometry(f"+{root.winfo_x()+e.x-root._dx}+{root.winfo_y()+e.y-root._dy}")
+
+        def _release(e):
+            if self._on_pos_save:
+                self._on_pos_save(root.winfo_x(), root.winfo_y())
+
+        root.bind("<ButtonPress-1>",   _press)
+        root.bind("<B1-Motion>",       _drag)
+        root.bind("<ButtonRelease-1>", _release)
+
+        # ── outer container (provides 1-px border) ────────────────────────────
+        outer = tk.Frame(root, bg=BORDER)
+        outer.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+
+        # ════════════════════════════════════════════════════════════════════════
+        # HEADER  ◉  Character Name          [🔊][📜][🎤][📍][⚙] [─]
+        # ════════════════════════════════════════════════════════════════════════
+        hdr = tk.Frame(outer, bg=BG_HEADER, height=40)
+        hdr.pack(fill=tk.X)
+        hdr.pack_propagate(False)
+
+        # Status dot
+        self._dot_canvas = tk.Canvas(hdr, width=10, height=10,
+                                     bg=BG_HEADER, highlightthickness=0)
+        self._dot_id = self._dot_canvas.create_oval(0, 0, 9, 9,
+                                                     fill=DOT_IDLE, outline="")
+        self._dot_canvas.pack(side=tk.LEFT, padx=(14, 6), pady=15)
+
+        # Character name
         self._char_var = tk.StringVar(value="—")
-        tk.Label(top, textvariable=self._char_var,
-                 fg=ACCENT_LIGHT, bg=BG,
-                 font=tkfont.Font(family="Arial", size=11, weight="bold"),
-                 anchor="w").pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Label(hdr, textvariable=self._char_var,
+                 fg=ACCENT_L, bg=BG_HEADER,
+                 font=(FONT, 11, "bold"), anchor="w"
+                 ).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        icon_btn = dict(bg=BORDER, fg=TEXT, relief="flat",
-                        font=tkfont.Font(family="Arial", size=8),
-                        padx=7, pady=2, cursor="hand2", bd=0,
-                        activebackground=ACCENT, activeforeground="white")
+        # Right-side icon buttons
+        def _hbtn(parent, label, cmd, danger=False):
+            b = tk.Button(parent, text=label, command=cmd,
+                          bg=BG_HEADER, fg=TEXT if not danger else RED,
+                          relief="flat", bd=0, padx=8, pady=0,
+                          font=(FONT, 9), cursor="hand2",
+                          activebackground=BORDER, activeforeground=TEXT)
+            b.pack(side=tk.RIGHT)
+            return b
 
-        # right-side icon buttons (right-to-left pack order)
-        tk.Button(top, text="—",
-                  command=self._minimize_to_tray, **icon_btn
-                  ).pack(side=tk.RIGHT, padx=(3, 0))
-        tk.Button(top, text="⚙ Settings",
-                  command=self._open_settings_dialog, **icon_btn
-                  ).pack(side=tk.RIGHT, padx=(3, 0))
-        tk.Button(top, text="📍 Region",
-                  command=self._on_region_change, **icon_btn
-                  ).pack(side=tk.RIGHT, padx=(3, 0))
-        tk.Button(top, text="🎤 Voices",
-                  command=self._open_voice_dialog, **icon_btn
-                  ).pack(side=tk.RIGHT, padx=(3, 0))
-        tk.Button(top, text="📜 History",
-                  command=self._open_history_dialog, **icon_btn
-                  ).pack(side=tk.RIGHT, padx=(3, 0))
-        self._mute_btn = tk.Button(top, text="🔊",
-                                   command=self._do_toggle_mute, **icon_btn)
-        self._mute_btn.pack(side=tk.RIGHT, padx=(3, 0))
+        _hbtn(hdr, "─",   self._minimize_to_tray)
+        _hbtn(hdr, "⚙",   self._open_settings_dialog)
+        _hbtn(hdr, "📍",  self._on_region_change)
+        _hbtn(hdr, "🎤",  self._open_voice_dialog)
+        _hbtn(hdr, "📜",  self._open_history_dialog)
+        self._mute_btn = _hbtn(hdr, "🔊", self._do_toggle_mute)
 
-        # ── separator ─────────────────────────────────────────────────
-        tk.Frame(root, bg=BORDER, height=1).pack(fill=tk.X, padx=10)
+        # ════════════════════════════════════════════════════════════════════════
+        # DIALOGUE TEXT
+        # ════════════════════════════════════════════════════════════════════════
+        tk.Frame(outer, bg=BORDER, height=1).pack(fill=tk.X)
 
-        # ── dialogue text ─────────────────────────────────────────────
+        content = tk.Frame(outer, bg=BG_MAIN)
+        content.pack(fill=tk.X)
+
         self._text_var = tk.StringVar(value="Waiting for dialogue…")
-        tk.Label(root, textvariable=self._text_var,
-                 fg=TEXT, bg=BG,
-                 font=tkfont.Font(family="Arial", size=10),
-                 wraplength=530, justify="left", anchor="nw"
-                 ).pack(padx=12, pady=(6, 4), fill=tk.X)
+        tk.Label(content, textvariable=self._text_var,
+                 fg=TEXT, bg=BG_MAIN,
+                 font=(FONT, 10),
+                 wraplength=548, justify="left", anchor="nw",
+                 padx=14, pady=10
+                 ).pack(fill=tk.X)
 
-        # ── separator ─────────────────────────────────────────────────
-        tk.Frame(root, bg=BORDER, height=1).pack(fill=tk.X, padx=10)
+        # ════════════════════════════════════════════════════════════════════════
+        # CONTROLS  [▶ Repeat] [■ Stop]   Speed  − 1.0× +    ⌨ R/S/M
+        # ════════════════════════════════════════════════════════════════════════
+        tk.Frame(outer, bg=BORDER, height=1).pack(fill=tk.X)
 
-        # ── controls ──────────────────────────────────────────────────
-        ctrl = tk.Frame(root, bg=BG)
-        ctrl.pack(padx=10, pady=6, fill=tk.X)
+        ctrl = tk.Frame(outer, bg=BG_CTRL, height=38)
+        ctrl.pack(fill=tk.X)
+        ctrl.pack_propagate(False)
 
-        btn = dict(bg=ACCENT, fg="white", relief="flat",
-                   font=tkfont.Font(family="Arial", size=9),
-                   padx=10, pady=3, cursor="hand2", bd=0,
-                   activebackground=ACCENT2, activeforeground="white")
+        def _cbtn(parent, label, cmd, primary=True):
+            bg  = ACCENT   if primary else BORDER
+            abg = ACCENT_H if primary else "#252535"
+            b = tk.Button(parent, text=label, command=cmd,
+                          bg=bg, fg=TEXT, relief="flat", bd=0,
+                          font=(FONT, 9), cursor="hand2",
+                          padx=12, pady=0,
+                          activebackground=abg, activeforeground=TEXT)
+            b.pack(side=tk.LEFT, padx=(0, 4), pady=6)
+            return b
 
-        tk.Button(ctrl, text="⏮ Repeat", command=self._on_repeat, **btn
-                  ).pack(side=tk.LEFT, padx=(0, 4))
-        tk.Button(ctrl, text="■ Stop", command=self._on_stop, **btn
-                  ).pack(side=tk.LEFT, padx=(0, 12))
+        _cbtn(ctrl, "▶  Repeat", self._on_repeat)
+        _cbtn(ctrl, "■  Stop",   self._stop_and_idle, primary=False)
 
-        tk.Label(ctrl, text="Speed", fg=MUTED, bg=BG,
-                 font=tkfont.Font(family="Arial", size=8)).pack(side=tk.LEFT)
+        # divider
+        tk.Frame(ctrl, bg=BORDER, width=1).pack(side=tk.LEFT, fill=tk.Y, pady=8, padx=8)
 
-        self._speed_var = tk.DoubleVar(value=self._initial_speed)
-        tk.Scale(ctrl, from_=0.5, to=2.0, resolution=0.1,
-                 orient=tk.HORIZONTAL, variable=self._speed_var,
-                 command=lambda v: self._on_speed_change(float(v)),
-                 bg=BG, fg=TEXT, troughcolor=BORDER,
-                 highlightthickness=0, length=110, showvalue=True,
-                 activebackground=ACCENT,
-                 ).pack(side=tk.LEFT, padx=(4, 0))
+        # Speed label + − / + buttons
+        tk.Label(ctrl, text="Speed", fg=SUBTEXT, bg=BG_CTRL,
+                 font=(FONT, 8)).pack(side=tk.LEFT, padx=(0, 6))
+
+        def _spd_btn(txt, delta):
+            def cmd():
+                self._speed = round(max(0.5, min(2.0, self._speed + delta)), 1)
+                self._speed_lbl.config(text=f"{self._speed:.1f}×")
+                self._on_speed_change(self._speed)
+            b = tk.Button(ctrl, text=txt, command=cmd,
+                          bg=MUTED, fg=TEXT, relief="flat", bd=0,
+                          font=(FONT, 10, "bold"), cursor="hand2",
+                          padx=6, pady=0,
+                          activebackground=ACCENT, activeforeground=TEXT)
+            b.pack(side=tk.LEFT)
+
+        _spd_btn("−", -0.1)
+        self._speed_lbl = tk.Label(ctrl, text=f"{self._speed:.1f}×",
+                                   fg=TEXT, bg=BG_CTRL,
+                                   font=(FONT, 9, "bold"),
+                                   width=5, anchor="center")
+        self._speed_lbl.pack(side=tk.LEFT)
+        _spd_btn("+", +0.1)
 
         # hotkey hint
-        tk.Label(ctrl,
-                 text="Ctrl+Alt: R=Repeat  S=Stop  M=Mute",
-                 fg=MUTED, bg=BG,
-                 font=tkfont.Font(family="Arial", size=7)
-                 ).pack(side=tk.RIGHT)
+        tk.Label(ctrl, text="Ctrl+Alt:  R  S  M",
+                 fg=MUTED, bg=BG_CTRL,
+                 font=(FONT, 7)).pack(side=tk.RIGHT, padx=12)
 
         self._root = root
 
-    # ── mute ──────────────────────────────────────────────────────────
+    # ── internal helpers ──────────────────────────────────────────────────────
+
+    def _set_dot(self, colour: str):
+        if self._dot_canvas and self._dot_id:
+            self._dot_canvas.itemconfig(self._dot_id, fill=colour)
+
+    def _stop_and_idle(self):
+        self._on_stop()
+        if self._root:
+            self._root.after(0, self._set_dot, DOT_IDLE)
 
     def _do_toggle_mute(self):
         self._muted = not self._muted
         if self._muted:
-            self._mute_btn.config(text="🔇", bg=RED)
+            self._mute_btn.config(text="🔇", fg=RED)
+            self._set_dot(DOT_MUTE)
             self._on_stop()
         else:
-            self._mute_btn.config(text="🔊", bg=BORDER)
+            self._mute_btn.config(text="🔊", fg=TEXT)
+            self._set_dot(DOT_IDLE)
 
-    # ── system tray ───────────────────────────────────────────────────
+    # ── system tray ───────────────────────────────────────────────────────────
 
     def _start_tray(self):
-        img = _make_tray_image()
+        img  = _make_tray_image()
         menu = pystray.Menu(
             pystray.MenuItem("Show / Hide", self._tray_toggle, default=True),
-            pystray.MenuItem("Quit", self._tray_quit),
+            pystray.MenuItem("Quit",        self._tray_quit),
         )
         self._tray_icon = pystray.Icon("RenpyTTS", img, "TTS Companion", menu)
-        thread = threading.Thread(target=self._tray_icon.run, daemon=True)
-        thread.start()
+        threading.Thread(target=self._tray_icon.run, daemon=True).start()
 
     def _minimize_to_tray(self):
         if self._root:
             self._root.withdraw()
 
-    def _tray_toggle(self, icon=None, item=None):
+    def _tray_toggle(self, *_):
         if self._root:
             self._root.after(0, self._do_tray_toggle)
 
@@ -240,45 +297,38 @@ class OverlayWindow:
             self._root.deiconify()
             self._root.lift()
 
-    def _tray_quit(self, icon=None, item=None):
+    def _tray_quit(self, *_):
         if self._tray_icon:
             self._tray_icon.stop()
         if self._root:
             self._root.after(0, self._root.destroy)
 
-    # ── history dialog ────────────────────────────────────────────────
+    # ── history dialog ────────────────────────────────────────────────────────
 
     def _open_history_dialog(self):
         if not self._root:
             return
         dlg = tk.Toplevel(self._root)
         dlg.title("Dialogue History")
-        dlg.configure(bg=BG2)
+        dlg.configure(bg=BG_DIALOG)
         dlg.geometry("500x380")
         dlg.attributes("-topmost", True)
         dlg.resizable(True, True)
 
-        tk.Label(dlg, text="Recent Dialogue",
-                 fg=ACCENT_LIGHT, bg=BG2,
-                 font=tkfont.Font(family="Arial", size=10, weight="bold")
-                 ).pack(padx=14, pady=(10, 4), anchor="w")
-        tk.Frame(dlg, bg=BORDER, height=1).pack(fill=tk.X, padx=14, pady=(0, 6))
+        _dlg_title(dlg, "Recent Dialogue")
 
-        frame = tk.Frame(dlg, bg=BG2)
+        frame = tk.Frame(dlg, bg=BG_DIALOG)
         frame.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 10))
 
-        sb = tk.Scrollbar(frame)
+        sb  = tk.Scrollbar(frame)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
-
-        txt = tk.Text(frame, bg=BG, fg=TEXT, relief="flat",
-                      font=tkfont.Font(family="Arial", size=9),
-                      wrap=tk.WORD, yscrollcommand=sb.set,
-                      padx=8, pady=6, spacing1=2)
+        txt = tk.Text(frame, bg=BG_MAIN, fg=TEXT, relief="flat",
+                      font=(FONT, 9), wrap=tk.WORD,
+                      yscrollcommand=sb.set, padx=8, pady=6)
         txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sb.config(command=txt.yview)
 
-        txt.tag_config("char", fg=ACCENT_LIGHT,
-                       font=tkfont.Font(family="Arial", size=9, weight="bold"))
+        txt.tag_config("char", fg=ACCENT_L, font=(FONT, 9, "bold"))
         txt.tag_config("line", fg=TEXT)
 
         if not self._history:
@@ -288,96 +338,80 @@ class OverlayWindow:
                 txt.insert(tk.END, f"{char}\n", "char")
                 txt.insert(tk.END, f"  {line}\n\n", "line")
             txt.see(tk.END)
-
         txt.config(state=tk.DISABLED)
 
-    # ── voice / volume dialog ─────────────────────────────────────────
+    # ── voice / volume dialog ─────────────────────────────────────────────────
 
     def _open_voice_dialog(self):
         if not self._root:
             return
         dlg = tk.Toplevel(self._root)
-        dlg.title("Voice & Volume Settings")
-        dlg.configure(bg=BG2)
+        dlg.title("Voices & Volume")
+        dlg.configure(bg=BG_DIALOG)
         dlg.attributes("-topmost", True)
         dlg.resizable(False, False)
         dlg.grab_set()
 
-        tk.Label(dlg, text="Character Voice & Volume",
-                 fg=ACCENT_LIGHT, bg=BG2,
-                 font=tkfont.Font(family="Arial", size=10, weight="bold")
-                 ).pack(padx=16, pady=(12, 2), anchor="w")
-        tk.Label(dlg, text="Volume: 0.5 = quiet  1.0 = normal  2.0 = loud",
-                 fg=MUTED, bg=BG2,
-                 font=tkfont.Font(family="Arial", size=8)
-                 ).pack(padx=16, pady=(0, 6), anchor="w")
-        tk.Frame(dlg, bg=BORDER, height=1).pack(fill=tk.X, padx=16, pady=(0, 8))
+        _dlg_title(dlg, "Character Voices & Volume")
+        tk.Label(dlg, text="Volume  0.5 = quiet · 1.0 = normal · 2.0 = loud",
+                 fg=SUBTEXT, bg=BG_DIALOG,
+                 font=(FONT, 8)).pack(padx=16, pady=(0, 8), anchor="w")
 
-        scroll_frame = tk.Frame(dlg, bg=BG2)
+        scroll_frame = tk.Frame(dlg, bg=BG_DIALOG)
         scroll_frame.pack(padx=16, fill=tk.BOTH)
 
         all_chars = list(self._voices.keys())
         if "Narrator" not in all_chars:
             all_chars = ["Narrator"] + all_chars
 
-        voice_vars: dict[str, tk.StringVar] = {}
-        vol_vars:   dict[str, tk.DoubleVar] = {}
-        small = tkfont.Font(family="Arial", size=8)
-        norm  = tkfont.Font(family="Arial", size=9)
+        voice_vars: dict[str, tk.StringVar]  = {}
+        vol_vars:   dict[str, tk.DoubleVar]  = {}
 
         for char in all_chars:
-            cur_voice = self._voices.get(
-                char, NARRATOR_VOICE if char == "Narrator" else VOICE_POOL[0])
-            cur_vol = self._volumes.get(char, 1.0)
+            cur_voice = self._voices.get(char, NARRATOR_VOICE if char == "Narrator" else VOICE_POOL[0])
+            cur_vol   = self._volumes.get(char, 1.0)
 
-            row = tk.Frame(scroll_frame, bg=BG2)
+            row = tk.Frame(scroll_frame, bg=BG_DIALOG)
             row.pack(fill=tk.X, pady=3)
 
-            tk.Label(row, text=char, fg=TEXT, bg=BG2,
-                     font=norm, width=14, anchor="w").pack(side=tk.LEFT)
+            tk.Label(row, text=char, fg=TEXT, bg=BG_DIALOG,
+                     font=(FONT, 9), width=14, anchor="w").pack(side=tk.LEFT)
 
             vv = tk.StringVar(value=cur_voice)
             voice_vars[char] = vv
             menu = tk.OptionMenu(row, vv, *ALL_VOICES)
             menu.config(bg=BORDER, fg=TEXT, relief="flat",
-                        activebackground=ACCENT, activeforeground="white",
-                        font=small, highlightthickness=0, bd=0, padx=6, pady=2)
-            menu["menu"].config(bg=BG2, fg=TEXT,
-                                activebackground=ACCENT, activeforeground="white")
-            menu.pack(side=tk.LEFT, padx=(6, 12))
+                        activebackground=ACCENT, activeforeground=TEXT,
+                        font=(FONT, 8), highlightthickness=0, bd=0, padx=6)
+            menu["menu"].config(bg=BG_MAIN, fg=TEXT,
+                                activebackground=ACCENT, activeforeground=TEXT)
+            menu.pack(side=tk.LEFT, padx=(6, 14))
 
-            tk.Label(row, text="Vol:", fg=MUTED, bg=BG2,
-                     font=small).pack(side=tk.LEFT)
+            tk.Label(row, text="Vol:", fg=SUBTEXT, bg=BG_DIALOG,
+                     font=(FONT, 8)).pack(side=tk.LEFT)
+
             dv = tk.DoubleVar(value=cur_vol)
             vol_vars[char] = dv
             tk.Scale(row, from_=0.0, to=2.0, resolution=0.05,
                      orient=tk.HORIZONTAL, variable=dv,
-                     bg=BG2, fg=TEXT, troughcolor=BORDER,
+                     bg=BG_DIALOG, fg=TEXT, troughcolor=BORDER,
                      highlightthickness=0, length=90, showvalue=True,
-                     activebackground=ACCENT, font=small,
+                     activebackground=ACCENT, font=(FONT, 7),
                      ).pack(side=tk.LEFT)
 
-        tk.Frame(dlg, bg=BORDER, height=1).pack(fill=tk.X, padx=16, pady=(10, 6))
+        _dlg_sep(dlg)
 
         def save():
-            updated_voices  = {c: v.get() for c, v in voice_vars.items()}
-            updated_volumes = {c: round(v.get(), 2) for c, v in vol_vars.items()}
-            self._voices  = updated_voices
-            self._volumes = updated_volumes
-            self._on_voice_save(updated_voices, updated_volumes)
+            self._voices  = {c: v.get() for c, v in voice_vars.items()}
+            self._volumes = {c: round(v.get(), 2) for c, v in vol_vars.items()}
+            self._on_voice_save(self._voices, self._volumes)
             dlg.destroy()
 
-        tk.Button(dlg, text="Save", command=save,
-                  bg=ACCENT, fg="white", relief="flat",
-                  padx=20, pady=4, cursor="hand2",
-                  activebackground=ACCENT2,
-                  font=tkfont.Font(family="Arial", size=9)
-                  ).pack(pady=(0, 12))
-
+        _dlg_btn(dlg, "Save", save)
         dlg.update_idletasks()
         dlg.geometry(f"{dlg.winfo_reqwidth()+32}x{dlg.winfo_reqheight()}")
 
-    # ── settings dialog ───────────────────────────────────────────────
+    # ── settings dialog ───────────────────────────────────────────────────────
 
     def set_script_db(self, db):
         self._script_db = db
@@ -387,137 +421,105 @@ class OverlayWindow:
             return
         dlg = tk.Toplevel(self._root)
         dlg.title("Settings")
-        dlg.configure(bg=BG2)
+        dlg.configure(bg=BG_DIALOG)
         dlg.attributes("-topmost", True)
         dlg.resizable(False, False)
         dlg.grab_set()
 
-        norm = tkfont.Font(family="Arial", size=9)
-        small = tkfont.Font(family="Arial", size=8)
-        bold = tkfont.Font(family="Arial", size=10, weight="bold")
+        _dlg_title(dlg, "Game Scripts", sub="Point to the game's 'game/' folder for accurate\n"
+                                             "character names from .rpy files.")
 
-        # ── Game Scripts section ──────────────────────────────────────
-        tk.Label(dlg, text="Game Scripts (optional)",
-                 fg=ACCENT_LIGHT, bg=BG2, font=bold
-                 ).pack(padx=16, pady=(12, 2), anchor="w")
-        tk.Label(
-            dlg,
-            text="Point to the game's 'game/' folder to get exact character names\n"
-                 "from .rpy script files. OCR is still used for timing.",
-            fg=MUTED, bg=BG2, font=small, justify="left",
-        ).pack(padx=16, pady=(0, 8), anchor="w")
-        tk.Frame(dlg, bg=BORDER, height=1).pack(fill=tk.X, padx=16, pady=(0, 8))
-
-        folder_row = tk.Frame(dlg, bg=BG2)
+        folder_row = tk.Frame(dlg, bg=BG_DIALOG)
         folder_row.pack(padx=16, fill=tk.X)
 
         folder_var = tk.StringVar(value=self._game_folder or "No folder selected")
         tk.Label(folder_row, textvariable=folder_var,
-                 fg=TEXT, bg=BG2, font=small,
-                 width=38, anchor="w", wraplength=280
+                 fg=TEXT, bg=BG_DIALOG,
+                 font=(FONT, 8), width=36, anchor="w"
                  ).pack(side=tk.LEFT)
 
         def pick_folder():
-            path = filedialog.askdirectory(
-                title="Select the game's 'game/' folder",
-                parent=dlg,
-            )
-            if path:
-                folder_var.set(path)
+            p = filedialog.askdirectory(title="Select game/ folder", parent=dlg)
+            if p:
+                folder_var.set(p)
 
         tk.Button(folder_row, text="Browse…", command=pick_folder,
-                  bg=BORDER, fg=TEXT, relief="flat", font=small,
-                  padx=8, pady=2, cursor="hand2",
-                  activebackground=ACCENT, activeforeground="white",
+                  bg=BORDER, fg=TEXT, relief="flat", font=(FONT, 8),
+                  padx=8, cursor="hand2",
+                  activebackground=ACCENT, activeforeground=TEXT,
                   ).pack(side=tk.LEFT, padx=(8, 0))
 
-        # status label
         self._script_status_var = tk.StringVar(value=self._script_status_text())
         tk.Label(dlg, textvariable=self._script_status_var,
-                 fg=GREEN if (self._script_db and self._script_db.is_loaded) else MUTED,
-                 bg=BG2, font=small
+                 fg=GREEN if (self._script_db and self._script_db.is_loaded) else SUBTEXT,
+                 bg=BG_DIALOG, font=(FONT, 8)
                  ).pack(padx=16, pady=(6, 0), anchor="w")
 
-        tk.Frame(dlg, bg=BORDER, height=1).pack(fill=tk.X, padx=16, pady=(10, 6))
+        _dlg_sep(dlg)
 
-        def save():
-            new_folder = folder_var.get()
-            if new_folder == "No folder selected":
-                new_folder = ""
-            dlg.destroy()
-            self._game_folder = new_folder
-            self._on_game_folder_change(new_folder)
+        status_var = tk.StringVar(value="")
+        tk.Label(dlg, textvariable=status_var, fg=SUBTEXT,
+                 bg=BG_DIALOG, font=(FONT, 8)
+                 ).pack(padx=16, anchor="w")
 
         def auto_detect():
-            from src.capture import auto_detect_region
-            status_var.set("Detecting… (screenshot in 3s)")
+            status_var.set("Switching to game in 3 s, then detecting…")
             dlg.update_idletasks()
-            dlg.after(3000, _do_auto_detect)
+            dlg.after(3000, _do_detect)
 
-        def _do_auto_detect():
+        def _do_detect():
             from src.capture import auto_detect_region
             region = auto_detect_region()
             if region:
-                status_var.set(
-                    f"Detected region: {region['width']}×{region['height']} "
-                    f"at ({region['left']},{region['top']})"
-                )
+                status_var.set(f"✓ Detected {region['width']}×{region['height']} "
+                               f"at ({region['left']},{region['top']})")
                 self._on_region_change_with_value(region)
             else:
-                status_var.set("Could not detect dialogue area — try manually.")
+                status_var.set("Could not detect — try drawing manually.")
 
-        status_var = tk.StringVar(value="")
-        tk.Label(dlg, textvariable=status_var, fg=MUTED, bg=BG2,
-                 font=tkfont.Font(family="Arial", size=8)
-                 ).pack(padx=16, anchor="w")
+        def save_scripts():
+            nf = folder_var.get()
+            if nf == "No folder selected":
+                nf = ""
+            dlg.destroy()
+            self._game_folder = nf
+            self._on_game_folder_change(nf)
 
-        btn_row = tk.Frame(dlg, bg=BG2)
-        btn_row.pack(pady=(4, 0))
-
+        btn_row = tk.Frame(dlg, bg=BG_DIALOG)
+        btn_row.pack(pady=(6, 0))
         tk.Button(btn_row, text="🔍 Auto-detect Region",
                   command=auto_detect,
                   bg=BORDER, fg=TEXT, relief="flat",
                   padx=12, pady=4, cursor="hand2",
-                  activebackground=ACCENT, activeforeground="white",
-                  font=norm,
-                  ).pack(side=tk.LEFT, padx=(0, 6))
-
-        tk.Button(btn_row, text="Save & Load Scripts", command=save,
-                  bg=ACCENT, fg="white", relief="flat",
+                  activebackground=ACCENT, activeforeground=TEXT,
+                  font=(FONT, 9)).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Button(btn_row, text="Save & Load Scripts",
+                  command=save_scripts,
+                  bg=ACCENT, fg=TEXT, relief="flat",
                   padx=12, pady=4, cursor="hand2",
-                  activebackground=ACCENT2,
-                  font=norm,
-                  ).pack(side=tk.LEFT)
+                  activebackground=ACCENT_H,
+                  font=(FONT, 9)).pack(side=tk.LEFT)
 
-        # ── Reset section ─────────────────────────────────────────────
-        tk.Frame(dlg, bg=BORDER, height=1).pack(fill=tk.X, padx=16, pady=(12, 6))
-        tk.Label(dlg, text="Danger Zone",
-                 fg=RED, bg=BG2,
-                 font=tkfont.Font(family="Arial", size=9, weight="bold")
-                 ).pack(padx=16, anchor="w")
-        tk.Label(dlg,
-                 text="Clears all voices, volumes, region, position and settings.",
-                 fg=MUTED, bg=BG2,
-                 font=tkfont.Font(family="Arial", size=8)
-                 ).pack(padx=16, pady=(0, 6), anchor="w")
+        # Danger zone
+        _dlg_sep(dlg)
+        tk.Label(dlg, text="Danger Zone", fg=RED, bg=BG_DIALOG,
+                 font=(FONT, 9, "bold")).pack(padx=16, anchor="w")
+        tk.Label(dlg, text="Clears all voices, volumes, region, position and settings.",
+                 fg=SUBTEXT, bg=BG_DIALOG,
+                 font=(FONT, 8)).pack(padx=16, pady=(0, 6), anchor="w")
 
         def do_reset():
             dlg.destroy()
             self._on_reset()
 
         tk.Button(dlg, text="🔄 Reset Everything", command=do_reset,
-                  bg=RED, fg="white", relief="flat",
+                  bg=RED, fg=TEXT, relief="flat",
                   padx=12, pady=4, cursor="hand2",
                   activebackground="#dc2626",
-                  font=norm,
-                  ).pack(pady=(0, 12))
+                  font=(FONT, 9)).pack(pady=(0, 14))
 
         dlg.update_idletasks()
         dlg.geometry(f"{max(dlg.winfo_reqwidth()+32, 380)}x{dlg.winfo_reqheight()}")
-
-    def set_region_apply_callback(self, cb):
-        """Register callback for applying a pre-computed region (auto-detect)."""
-        self._on_region_apply = cb
 
     def _on_region_change_with_value(self, region: dict):
         cb = getattr(self, "_on_region_apply", None)
@@ -526,20 +528,16 @@ class OverlayWindow:
 
     def _script_status_text(self) -> str:
         db = self._script_db
-        if db is None:
-            return "Scripts: not loaded"
-        if db.load_error:
-            return f"Scripts: error — {db.load_error}"
-        if db.is_loaded:
-            return f"Scripts: ✓ {db.line_count:,} lines loaded"
+        if db is None:           return "Scripts: not loaded"
+        if db.load_error:        return f"Scripts: error — {db.load_error}"
+        if db.is_loaded:         return f"Scripts: ✓ {db.line_count:,} lines loaded"
         return "Scripts: loading…"
 
     def update_script_status(self):
-        """Call from main thread after script loading completes."""
         if self._root and hasattr(self, "_script_status_var"):
             self._root.after(0, self._script_status_var.set, self._script_status_text())
 
-    # ── entry point ───────────────────────────────────────────────────
+    # ── entry point ───────────────────────────────────────────────────────────
 
     def start(self):
         self.build()
@@ -547,3 +545,27 @@ class OverlayWindow:
         self._root.mainloop()
         if self._tray_icon:
             self._tray_icon.stop()
+
+
+# ── dialog helpers (DRY) ──────────────────────────────────────────────────────
+
+def _dlg_title(dlg: tk.Toplevel, title: str, sub: str = ""):
+    tk.Label(dlg, text=title, fg=ACCENT_L, bg=BG_DIALOG,
+             font=(FONT, 10, "bold")).pack(padx=16, pady=(14, 2), anchor="w")
+    if sub:
+        tk.Label(dlg, text=sub, fg=SUBTEXT, bg=BG_DIALOG,
+                 font=(FONT, 8), justify="left"
+                 ).pack(padx=16, pady=(0, 8), anchor="w")
+    _dlg_sep(dlg)
+
+
+def _dlg_sep(dlg: tk.Toplevel):
+    tk.Frame(dlg, bg=BORDER, height=1).pack(fill=tk.X, padx=16, pady=(6, 8))
+
+
+def _dlg_btn(dlg: tk.Toplevel, label: str, cmd):
+    tk.Button(dlg, text=label, command=cmd,
+              bg=ACCENT, fg=TEXT, relief="flat",
+              padx=20, pady=4, cursor="hand2",
+              activebackground=ACCENT_H,
+              font=(FONT, 9)).pack(pady=(0, 14))
