@@ -18,6 +18,14 @@ A desktop companion app that reads Ren'Py visual novel game dialogue aloud in re
 - Repeat, Stop, and Speed controls
 - Draggable overlay — position it anywhere on screen
 
+## Screenshots
+
+![Companion overlay reading narrator dialogue](screenshots/sc1.png)
+
+![Overlay displayed over an active game scene](screenshots/sc2.png)
+
+![Character name detection — Yumi speaking](screenshots/sc3.png)
+
 ## Requirements
 
 - Windows 10/11
