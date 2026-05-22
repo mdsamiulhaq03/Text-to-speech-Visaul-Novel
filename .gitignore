@@ -15,6 +15,9 @@ env/
 # Project runtime files
 config.json
 
+# PyInstaller
+*.spec
+
 # AI agent / planning files
 .claude/
 .superpowers/
