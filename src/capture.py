@@ -36,15 +36,36 @@ def _preprocess(img: Image.Image) -> Image.Image:
     return img
 
 
+def _looks_like_name(s: str) -> bool:
+    """
+    A character name is short, starts with a capital, contains no sentence-ending
+    punctuation, and has no lowercase letters that suggest a sentence beginning.
+    """
+    if not s or len(s) > 32:
+        return False
+    if s.endswith(('.', '!', '?', ',', '…', '...')):
+        return False
+    if '"' in s or '“' in s or '”' in s:
+        return False
+    # Must start with a capital letter
+    if not s[0].isupper():
+        return False
+    # If more than half the alphabetic chars are lowercase and it's long, it's dialogue
+    letters = [c for c in s if c.isalpha()]
+    if len(letters) > 12 and sum(1 for c in letters if c.islower()) / len(letters) > 0.4:
+        return False
+    return True
+
+
 def parse_dialogue(raw: str) -> tuple[str, str]:
     if not raw.strip():
         return "", ""
     lines = [l.strip() for l in raw.strip().splitlines() if l.strip()]
     if len(lines) == 1:
         return "Narrator", lines[0]
-    name = lines[0]
-    text = " ".join(lines[1:])
-    return name, text
+    if _looks_like_name(lines[0]):
+        return lines[0], " ".join(lines[1:])
+    return "Narrator", " ".join(lines)
 
 
 def has_changed(text: str, state: CaptureState) -> bool:
