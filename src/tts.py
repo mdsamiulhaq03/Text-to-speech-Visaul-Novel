@@ -47,9 +47,11 @@ class VoicePool:
 
 
 class TTSEngine:
-    def __init__(self, voice_pool: VoicePool, speed: float = 1.0):
+    def __init__(self, voice_pool: VoicePool, speed: float = 1.0,
+                 volumes: dict[str, float] | None = None):
         self._pool = voice_pool
         self._speed = speed
+        self._volumes: dict[str, float] = dict(volumes or {})
         self._lock = threading.Lock()
         self._current_channel: pygame.mixer.Channel | None = None
         self._abort_event: threading.Event = threading.Event()
@@ -61,15 +63,17 @@ class TTSEngine:
             logging.warning("pygame audio unavailable (%s), will use SAPI only", e)
 
     def speak(self, character: str, text: str):
-        # Signal any in-flight thread to abort before starting a new one
         self._abort_event.set()
         self._abort_event = threading.Event()
         abort = self._abort_event
 
         voice = self._pool.get_voice(character)
         rate = self._speed_to_edge_rate(self._speed)
+        volume = self._volumes.get(character, 1.0)
         thread = threading.Thread(
-            target=self._speak_thread, args=(text, voice, rate, abort), daemon=True
+            target=self._speak_thread,
+            args=(text, voice, rate, volume, abort),
+            daemon=True,
         )
         thread.start()
 
@@ -82,7 +86,14 @@ class TTSEngine:
     def set_speed(self, speed: float):
         self._speed = speed
 
-    def _speak_thread(self, text: str, voice: str, rate: str, abort: threading.Event):
+    def set_volume(self, character: str, volume: float):
+        self._volumes[character] = max(0.0, min(2.0, volume))
+
+    def get_volumes(self) -> dict[str, float]:
+        return dict(self._volumes)
+
+    def _speak_thread(self, text: str, voice: str, rate: str,
+                      volume: float, abort: threading.Event):
         if abort.is_set():
             return
         try:
@@ -90,13 +101,13 @@ class TTSEngine:
             if abort.is_set():
                 return
             if self._pygame_available:
-                self._play_audio(audio)
+                self._play_audio(audio, volume)
             else:
-                self._speak_sapi(text)
+                self._speak_sapi(text, self._speed, volume)
         except Exception as e:
             logging.warning("Edge TTS failed (%s), falling back to SAPI", e)
             if not abort.is_set():
-                self._speak_sapi(text, self._speed)
+                self._speak_sapi(text, self._speed, volume)
 
     @staticmethod
     async def _fetch_edge_audio(text: str, voice: str, rate: str) -> bytes:
@@ -107,17 +118,18 @@ class TTSEngine:
                 chunks.append(chunk["data"])
         return b"".join(chunks)
 
-    def _play_audio(self, audio: bytes):
+    def _play_audio(self, audio: bytes, volume: float = 1.0):
         with self._lock:
             sound = pygame.mixer.Sound(io.BytesIO(audio))
+            sound.set_volume(min(1.0, max(0.0, volume)))
             self._current_channel = sound.play()
 
     @staticmethod
-    def _speak_sapi(text: str, speed: float = 1.0):
+    def _speak_sapi(text: str, speed: float = 1.0, volume: float = 1.0):
         try:
             engine = pyttsx3.init()
-            # Map speed (0.5–2.0) to pyttsx3 rate (100–400 wpm, default ~200)
             engine.setProperty("rate", int(200 * speed))
+            engine.setProperty("volume", min(1.0, max(0.0, volume)))
             engine.say(text)
             engine.runAndWait()
         except Exception as e:

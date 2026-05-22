@@ -9,6 +9,7 @@ class Config:
         self._path = path
         self.region: dict | None = None
         self.voices: dict[str, str] = {}
+        self.volumes: dict[str, float] = {}
         self.speed: float = 1.0
         self._save_lock = threading.Lock()
         self._load()
@@ -21,15 +22,20 @@ class Config:
                 data = json.load(f)
             self.region = data.get("region")
             self.voices = data.get("voices", {})
+            self.volumes = data.get("volumes", {})
             self.speed = data.get("speed", 1.0)
         except json.JSONDecodeError:
-            # Silently fall back to defaults if JSON is corrupted
             pass
 
     def save(self):
-        data = {"region": self.region, "voices": self.voices, "speed": self.speed}
+        data = {
+            "region": self.region,
+            "voices": self.voices,
+            "volumes": self.volumes,
+            "speed": self.speed,
+        }
         dir_path = os.path.dirname(self._path)
-        if dir_path:  # Handle edge case where dirname returns empty string
+        if dir_path:
             os.makedirs(dir_path, exist_ok=True)
         with self._save_lock:
             with open(self._path, "w", encoding="utf-8") as f:
