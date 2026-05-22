@@ -5,6 +5,7 @@ from src.capture import CaptureState, start_capture_loop
 from src.region_selector import select_region, select_region_toplevel
 from src.tts import VoicePool, TTSEngine, VOICE_POOL, NARRATOR_VOICE
 from src.overlay import OverlayWindow
+from src.script_reader import ScriptDatabase
 
 CONFIG_PATH = "config.json"
 
@@ -38,6 +39,7 @@ def main():
     )
     tts = TTSEngine(voice_pool=voice_pool, speed=cfg.speed, volumes=cfg.volumes)
     capture_state = CaptureState()
+    script_db = ScriptDatabase()
 
     last_line = {"character": "", "text": ""}
 
@@ -58,20 +60,42 @@ def main():
             tts.set_volume(char, vol)
         cfg.save()
 
+    def on_game_folder_change(folder: str):
+        cfg.game_folder = folder
+        cfg.save()
+        if not folder:
+            return
+        overlay.update_script_status()
+        script_db.load(folder, on_done=lambda: overlay.update_script_status())
+
     overlay = OverlayWindow(
         on_repeat=lambda: tts.speak(last_line["character"], last_line["text"]),
         on_stop=tts.stop,
         on_speed_change=lambda v: (tts.set_speed(v), setattr(cfg, "speed", v), cfg.save()),
         on_region_change=on_region_change,
         on_voice_save=on_voice_save,
+        on_game_folder_change=on_game_folder_change,
         speed=cfg.speed,
         voices=cfg.voices,
         volumes=cfg.volumes,
+        game_folder=cfg.game_folder,
+        script_db=script_db,
     )
+
+    # Auto-load scripts from saved folder on startup
+    if cfg.game_folder:
+        script_db.load(cfg.game_folder, on_done=lambda: overlay.update_script_status())
 
     def on_new_line(character: str, text: str):
         if text == last_line["text"]:
             return
+
+        # Use script database for character name if available (more accurate than OCR)
+        if script_db.is_loaded:
+            resolved = script_db.lookup(text)
+            if resolved:
+                character = resolved
+
         last_line["character"] = character
         last_line["text"] = text
         overlay.update_line(character, text)
