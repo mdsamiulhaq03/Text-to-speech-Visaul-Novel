@@ -55,6 +55,8 @@ class TTSEngine:
         self._lock = threading.Lock()
         self._current_channel: pygame.mixer.Channel | None = None
         self._abort_event: threading.Event = threading.Event()
+        self._speaking = threading.Event()   # set while audio is playing
+        self._next: tuple[str, str] | None = None  # buffered next line
         self._pygame_available = False
         try:
             pygame.mixer.init()
@@ -63,25 +65,35 @@ class TTSEngine:
             logging.warning("pygame audio unavailable (%s), will use SAPI only", e)
 
     def speak(self, character: str, text: str):
+        """Interrupt current speech and start immediately."""
         self._abort_event.set()
+        self._next = None
         self._abort_event = threading.Event()
+        self._speaking.clear()
         abort = self._abort_event
-
         voice = self._pool.get_voice(character)
         rate = self._speed_to_edge_rate(self._speed)
         volume = self._volumes.get(character, 1.0)
-        thread = threading.Thread(
+        threading.Thread(
             target=self._speak_thread,
             args=(text, voice, rate, volume, abort),
             daemon=True,
-        )
-        thread.start()
+        ).start()
+
+    def speak_queued(self, character: str, text: str):
+        """Finish current sentence first, then speak this line."""
+        if not self._speaking.is_set():
+            self.speak(character, text)
+        else:
+            self._next = (character, text)  # replace any pending line
 
     def stop(self):
         self._abort_event.set()
+        self._next = None
         with self._lock:
             if self._current_channel:
                 self._current_channel.stop()
+        self._speaking.clear()
 
     def set_speed(self, speed: float):
         self._speed = speed
@@ -96,18 +108,26 @@ class TTSEngine:
                       volume: float, abort: threading.Event):
         if abort.is_set():
             return
+        self._speaking.set()
         try:
             audio = asyncio.run(self._fetch_edge_audio(text, voice, rate))
             if abort.is_set():
                 return
             if self._pygame_available:
-                self._play_audio(audio, volume)
+                self._play_audio_blocking(audio, volume, abort)
             else:
                 self._speak_sapi(text, self._speed, volume)
         except Exception as e:
             logging.warning("Edge TTS failed (%s), falling back to SAPI", e)
             if not abort.is_set():
                 self._speak_sapi(text, self._speed, volume)
+        finally:
+            self._speaking.clear()
+            # If a next line was queued while we were speaking, start it now
+            nxt = self._next
+            self._next = None
+            if nxt and not abort.is_set():
+                self.speak(*nxt)
 
     @staticmethod
     async def _fetch_edge_audio(text: str, voice: str, rate: str) -> bytes:
@@ -118,11 +138,16 @@ class TTSEngine:
                 chunks.append(chunk["data"])
         return b"".join(chunks)
 
-    def _play_audio(self, audio: bytes, volume: float = 1.0):
+    def _play_audio_blocking(self, audio: bytes, volume: float, abort: threading.Event):
+        import time as _time
         with self._lock:
             sound = pygame.mixer.Sound(io.BytesIO(audio))
             sound.set_volume(min(1.0, max(0.0, volume)))
-            self._current_channel = sound.play()
+            channel = sound.play()
+            self._current_channel = channel
+        # Wait for playback to finish or abort
+        while channel and channel.get_busy() and not abort.is_set():
+            _time.sleep(0.05)
 
     @staticmethod
     def _speak_sapi(text: str, speed: float = 1.0, volume: float = 1.0):
